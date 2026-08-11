@@ -238,9 +238,9 @@ def poll(conn: psycopg.Connection, *, dry_run: bool) -> dict:
                 """
                 insert into zarvis.decision_case
                   (workspace_id, person_id, queue_item_id, draft_id, situation,
-                   chosen, verdict, reason_code, proposed_body, final_body,
-                   edit_distance, options)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   chosen, rationale, verdict, reason_code, proposed_body,
+                   final_body, edit_distance, options)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (get_config().workspace_id, row["person_id"], row["queue_item_id"],
                  row["id"], "draft delivered to Gmail", verdict,

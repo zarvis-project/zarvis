@@ -1,0 +1,6 @@
+# Normalise to LF in the repository. Without this, a build run from Windows
+# reports every copied file as modified because the working copy has CRLF and
+# the index has LF, and 16 phantom changes hide the 2 real ones.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
