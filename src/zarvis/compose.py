@@ -62,9 +62,37 @@ MAX_BODY_TOKENS = 1200
 
 
 def _load_prompts() -> str:
-    voice = (PROMPT_DIR / "voice.md").read_text(encoding="utf-8")
-    humanize = (PROMPT_DIR / "humanize.md").read_text(encoding="utf-8")
-    return f"{voice}\n\n---\n\n{humanize}"
+    """Your voice, falling back to the shipped template.
+
+    A fresh clone has `voice.example.md` and no `voice.md`, because the real one
+    is personal and gitignored. Without a fallback the composer raises
+    FileNotFoundError on first run and the published test suite fails on a clean
+    checkout, which reads as a broken repo rather than a setup step not yet
+    done.
+
+    The fallback is deliberately loud. Drafts written against the template sound
+    like a model wrote them, which is exactly what the file exists to prevent,
+    so this should stay a nuisance until someone fixes it properly.
+    """
+    parts = []
+    for name in ("voice", "humanize"):
+        real = PROMPT_DIR / f"{name}.md"
+        example = PROMPT_DIR / f"{name}.example.md"
+        if real.exists():
+            parts.append(real.read_text(encoding="utf-8"))
+        elif example.exists():
+            log.warning(
+                "prompts/%s.md not found, falling back to %s.example.md. Copy "
+                "it and rewrite it as yourself, or every draft will read as "
+                "generic.", name, name,
+            )
+            parts.append(example.read_text(encoding="utf-8"))
+        else:
+            raise FileNotFoundError(
+                f"neither {real} nor {example} exists. The composer cannot "
+                f"write in a voice it has never been given."
+            )
+    return "\n\n---\n\n".join(parts)
 
 
 SYSTEM_TEMPLATE = """You draft emails as Ryan Miller, founder of Zenith Project.
