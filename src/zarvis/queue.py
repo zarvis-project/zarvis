@@ -96,6 +96,7 @@ def _load_people(conn: psycopg.Connection) -> dict[str, dict]:
                 select 1 from zarvis.person_identity i
                 where i.person_id = p.id
                   and i.kind = 'email'
+                  and i.superseded_at is null
                   /*SYNTH:i.value*/
               ) as has_real_email,
               exists (

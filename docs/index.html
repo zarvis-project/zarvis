@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zarvis — open-source sales intelligence layer</title>
+<meta name="description" content="An open-source sales intelligence layer. Reads the tools you already use, works out which relationships need attention today, and writes the emails into your drafts folder. It never sends.">
+<meta property="og:title" content="Zarvis">
+<meta property="og:description" content="Open-source sales intelligence layer. Drafts, never sends. About $0.40 a day.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://zarvis.co">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="mark" aria-hidden="true"></div>
+    <h1>Zarvis</h1>
+    <p class="tagline">An open-source sales intelligence layer.</p>
+    <p class="lede">
+      It reads the tools you already use, works out which relationships need
+      attention today, and writes the emails into your drafts folder.
+    </p>
+    <p class="never">
+      <strong>It never sends.</strong> A human presses send. That is enforced by
+      a test, not a promise.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/zarvis-project/zarvis">View on GitHub</a>
+      <a class="btn" href="https://github.com/zarvis-project/zarvis#setup">Set it up</a>
+    </div>
+    <p class="cost">Runs for about $0.35 to $0.50 a day.</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section>
+    <h2>What it does, every morning</h2>
+    <ol class="steps">
+      <li><strong>Ingest.</strong> Mail, calendar and meeting recordings since the last run.</li>
+      <li><strong>Rank.</strong> Every relationship scored, so the list is a standing agenda rather than a fresh guess each day.</li>
+      <li><strong>Decide.</strong> A review board of independent voices argues over the top of the board and decides who to contact and what to say.</li>
+      <li><strong>Draft.</strong> Emails in your voice, written from an evidence bundle the model is not allowed to go outside of.</li>
+      <li><strong>Lint.</strong> Anything stating a fact the evidence does not support is blocked before you ever see it.</li>
+      <li><strong>Deliver.</strong> Into your Gmail drafts.</li>
+      <li><strong>Brief.</strong> What it did, what it decided against, and what it cost.</li>
+    </ol>
+    <p>
+      Then it watches what you do with each draft. Sent as written, sent after
+      edits, or deleted. That verdict is the training signal, and it is the one
+      thing here that cannot be reconstructed later.
+    </p>
+  </section>
+
+  <section>
+    <h2>Why the ranking is not a CRM score</h2>
+    <pre class="formula"><code>Eff = max(1, Ease - Cost)
+t   = (Eff - 1) / 9
+PS  = 1.5·Eff + (2 - t)·Impact + (1 + t)·Urgency</code></pre>
+    <p>
+      <strong>Ease dominates.</strong> A quick win beats a slightly more valuable
+      slog, because the list you actually work through beats the list that is
+      theoretically optimal and sits untouched.
+    </p>
+    <p>
+      <strong>Urgency counts for more on easy things, impact counts for more on
+      hard ones.</strong> That is the <code>t</code> term. A two-minute reply
+      that is time-sensitive should jump the queue. An expensive move should be
+      justified by what it is worth, not by the fact that it is nagging you.
+    </p>
+    <p>
+      Decay follows a logistic curve rather than a linear one, because
+      relationships do not cool at a constant rate. They are fine, and then
+      suddenly they are not.
+    </p>
+  </section>
+
+  <section>
+    <h2>Plugs into what you already have</h2>
+    <table>
+      <thead><tr><th>Source</th><th>What it contributes</th></tr></thead>
+      <tbody>
+        <tr><td>Gmail</td><td>Correspondence, reply detection, the delivery target</td></tr>
+        <tr><td>Google Calendar</td><td>Meetings held and booked, identity discovery from invites</td></tr>
+        <tr><td>Fireflies</td><td>Meeting summaries. Not transcripts, deliberately</td></tr>
+        <tr><td>Notion</td><td>One-way CRM import: contacts, notes, page bodies</td></tr>
+      </tbody>
+    </table>
+    <p>
+      A source writes rows into two tables. Everything downstream reads those
+      and nothing else, so adding one is self-contained and cannot break
+      ranking.
+    </p>
+  </section>
+
+  <section class="callout">
+    <h2>Built in public</h2>
+    <p>
+      The interesting parts are the bugs, and they are written up in the code
+      rather than tidied away. A poller that read its own cleanup as a
+      rejection. A dry run that advanced a cursor and ate the real run's work.
+      A batch retry at the wrong level that discarded two thirds of its input
+      while reporting success.
+    </p>
+    <p>
+      Every one is a comment explaining what happened, because the reasoning is
+      worth more than the fix.
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="https://github.com/zarvis-project/zarvis">GitHub</a>
+    <span>·</span>
+    <a href="https://github.com/zarvis-project/zarvis/blob/main/CONTRIBUTING.md">Contributing</a>
+    <span>·</span>
+    <a href="https://github.com/zarvis-project/zarvis/blob/main/LICENSE">MIT</a>
+    <p class="by">Built by Ryan Miller.</p>
+  </div>
+</footer>
+
+</body>
+</html>

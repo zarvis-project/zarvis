@@ -119,9 +119,10 @@ USER_TEMPLATE = """# The move
 
 # Who
 
-**Name:** {full_name}
+**Writing to:** {full_name}
 **First name for the greeting:** {first_name}
 {extra_person}
+{routing}
 
 # Evidence bundle
 
@@ -167,8 +168,27 @@ def _build_prompt(item: dict) -> tuple[str, str, str]:
             f"```\n{last_inbound[:4000]}\n```\n\n"
         )
 
-    full_name = item["full_name"] or ""
+    # The recipient is the agency when one manages this person. Ryan's rule:
+    # the agency is the go-between and their client is not emailed directly.
+    # The email is still ABOUT the client, which is what `routing` explains.
+    subject_name = item["full_name"] or ""
+    manager = item.get("route_full_name")
+    full_name = manager or subject_name
     first_name = full_name.split()[0] if full_name else ""
+
+    routing = ""
+    if manager:
+        routing = (
+            f"**This is an agency account.** {subject_name} is a client of "
+            f"{manager}, who resells Zenith to them.\n\n"
+            f"You are writing to {manager}, ABOUT {subject_name}. Do not write "
+            f"to {subject_name}, do not greet them, and do not write as though "
+            f"they will read this. The agency owns the relationship with their "
+            f"own client, and Ryan going around them would be a real breach "
+            f"rather than a style problem.\n\n"
+            f"Ask {manager} what they want to do, or tell them what you are "
+            f"seeing. They decide whether their client hears about it."
+        )
 
     extra = []
     if item.get("title"):
@@ -196,6 +216,7 @@ def _build_prompt(item: dict) -> tuple[str, str, str]:
         play_instruction=instruction,
         full_name=full_name,
         first_name=first_name,
+        routing=routing,
         extra_person="\n".join(extra),
         evidence=evidence_json,
         thread=thread,
@@ -255,13 +276,34 @@ def _draftable(conn: psycopg.Connection, limit: int,
               p.full_name, p.title, p.style_notes,
               (select i.value from zarvis.person_identity i
                 where i.person_id = p.id and i.kind = 'email'
+                  and i.superseded_at is null
                   /*SYNTH:i.value*/
                 order by i.created_at limit 1) as email,
               (select array_agg(d.idempotency_key) from zarvis.draft d
-                where d.queue_item_id = q.id) as draft_keys
+                where d.queue_item_id = q.id) as draft_keys,
+              -- WHO THE EMAIL IS ACTUALLY ADDRESSED TO.
+              --
+              -- For a client sitting under an agency, that is the AGENCY, not
+              -- the client. Ryan's rule: the agency is the go-between, and
+              -- mailing their client directly goes around the person who owns
+              -- the relationship. It is the reseller's account to manage.
+              --
+              -- Null when nobody manages them, and every consumer falls back to
+              -- the person themselves. The join is deliberately not filtered on
+              -- scope: any management relationship means somebody stands
+              -- between Ryan and this person, which is the whole question.
+              mgr.id as route_person_id,
+              mgr.full_name as route_full_name,
+              (select i.value from zarvis.person_identity i
+                where i.person_id = mgr.id and i.kind = 'email'
+                  and i.superseded_at is null
+                  /*SYNTH:i.value*/
+                order by i.created_at limit 1) as route_email
             from zarvis.queue_item q
             join zarvis.play pl on pl.id = q.play_id
             join zarvis.person p on p.id = q.person_id
+            left join zarvis.manages m on m.managed_id = p.id
+            left join zarvis.person mgr on mgr.id = m.manager_id
             where q.workspace_id = %s
               and q.status = 'open'
               -- When Ryan names someone in Slack, the play's own opinion about
@@ -364,8 +406,15 @@ def compose(conn: psycopg.Connection, *, dry_run: bool, run_id: str | None = Non
     for item in items:
         counts["considered"] += 1
         who = item["full_name"]
+        # The address follows the routing, not the subject. An agency's client
+        # is written ABOUT, to their agency; mailing them directly goes around
+        # the person who owns that relationship.
+        item["recipient_name"] = item.get("route_full_name") or item["full_name"]
+        item["recipient_email"] = item.get("route_email") or item["email"]
+        if item.get("route_full_name"):
+            who = f"{item['route_full_name']} (about {item['full_name']})"
 
-        if not item["email"]:
+        if not item["recipient_email"]:
             log.warning("compose: %s has no address, skipping", who)
             counts["no_address"] += 1
             continue
@@ -414,7 +463,11 @@ def compose(conn: psycopg.Connection, *, dry_run: bool, run_id: str | None = Non
         spend += completion.cost_usd()
         body = sweep(body)
 
-        first_name = (item["full_name"] or "").split()[0] if item["full_name"] else None
+        # Lint the greeting against whoever actually receives it. Checking it
+        # against the client is what blocked two correct agency drafts as
+        # "wrong-name": the model greeted the agency, which was right.
+        recipient = item["recipient_name"] or ""
+        first_name = recipient.split()[0] if recipient else None
         findings = check(body, evidence_text=evidence_text, recipient_first_name=first_name)
         hard = blocking(findings)
 

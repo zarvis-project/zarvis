@@ -192,13 +192,36 @@ def _set_ts(conn: psycopg.Connection, channel: str, ts: str) -> None:
 PARSE_SYSTEM = """You route messages for Zarvis, Ryan Miller's sales assistant.
 
 Ryan writes to you in plain language about people in his book. Work out what he
-wants and who it is about. Return JSON only:
+wants and who each part is about. Return JSON only:
 
 {
-  "intent": "note | draft | room | status | ask | undo | idea | unclear",
-  "person": "the name as Ryan wrote it, or null",
-  "content": "the fact, instruction or direction, in Ryan's own words where possible"
+  "items": [
+    {
+      "intent": "note | draft | room | status | ask | undo | idea | unclear",
+      "person": "the name as Ryan wrote it, or null",
+      "content": "the fact, instruction or direction, in Ryan's own words where possible"
+    }
+  ]
 }
+
+ONE ITEM PER PERSON. THIS IS THE MOST IMPORTANT RULE HERE.
+
+A single message often carries facts about several people, because Ryan is
+correcting a report that covered several people. Split it. Each item's `content`
+must contain ONLY what is true of that item's person.
+
+  "I sent the draft to marek. I didn't bin it. I also sent the draft to Sunniva"
+
+  -> [{"intent": "note", "person": "marek",
+       "content": "Ryan sent the draft. He did not bin it."},
+      {"intent": "note", "person": "Sunniva",
+       "content": "Ryan sent the draft."}]
+
+Never put Sunniva's sentence in Marek's item. These become evidence bundles, and a
+fact about the wrong person is worse than a missing one: the drafting model
+cannot tell it is wrong and will write from it with confidence.
+
+Most messages are one item. Do not invent a second person to fill the list.
 
 INTENTS
   note    a fact about someone, for Zarvis to remember. The default when Ryan
@@ -221,6 +244,8 @@ RULES
   matching happens elsewhere and needs his exact words.
 - If a message contains a fact AND an instruction, prefer `draft` or `room` and
   put the fact in `content`, so nothing is lost.
+- A person mentioned only as context for someone else is not their own item.
+  "Ask JJ about the intro to Priya" is one item, about JJ.
 
 There is no urgency field. `draft` and `room` both run the moment he asks, so
 there is nothing for one to select between. It used to be here, was never read
@@ -228,12 +253,33 @@ by anything, and a field the model is asked to fill in that changes no behaviour
 is a false promise sitting in the contract."""
 
 
-def parse(text: str) -> dict:
-    completion = complete(PARSE_SYSTEM, text, max_tokens=400)
+def parse(text: str) -> list[dict]:
+    """-> a list of {intent, person, content}, one entry per person.
+
+    Always a list, even for the overwhelmingly common single-person message.
+
+    The older contract returned a single object, so a message about two people
+    had nowhere to put the second and the whole text was filed against whoever
+    was named first. "I sent the draft to Marek. I also sent the draft to Sunniva"
+    put a fact about Sunniva into Marek's evidence bundle, where the drafting model
+    reads it as being about Marek and writes from it with confidence. That is the
+    exact failure this module's docstring calls worse than a rejected command.
+
+    The single-object shape is still accepted, because the model occasionally
+    reverts to it and reshaping a stray response beats dropping Ryan's fact.
+    """
+    completion = complete(PARSE_SYSTEM, text, max_tokens=700)
     body = completion.text.strip()
     if body.startswith("```"):
         body = body.split("\n", 1)[1].rsplit("```", 1)[0]
-    return json.loads(body)
+    parsed = json.loads(body)
+
+    if isinstance(parsed, list):
+        return parsed
+    items = parsed.get("items")
+    if isinstance(items, list) and items:
+        return items
+    return [parsed]
 
 
 def resolve(conn: psycopg.Connection, name: str) -> list[dict]:
@@ -725,10 +771,33 @@ def handle(conn: psycopg.Connection, channel: str, text: str) -> str:
         dropped = pending["content"]
 
     try:
-        parsed = parse(text)
+        items = parse(text)
     except (LLMError, json.JSONDecodeError) as exc:
         log.error("parse failed: %s", exc)
         return "I could not read that one. Try naming the person and what you want."
+
+    replies = []
+    for index, item in enumerate(items):
+        # Only the first ambiguous item may occupy the pending slot; there is
+        # one slot per channel and a second question would silently evict the
+        # first, losing the fact attached to it.
+        reply = _route(conn, channel, item, text,
+                       may_ask=not any(r.startswith("Which one?") for r in replies))
+        replies.append(reply)
+
+    joined = "\n\n".join(replies)
+    if dropped:
+        joined = (
+            "_Dropping my earlier question. That note is not recorded:_\n"
+            f"> {dropped}\n\n{joined}"
+        )
+    return joined
+
+
+def _route(conn: psycopg.Connection, channel: str, parsed: dict, text: str,
+           *, may_ask: bool = True) -> str:
+    """Handle ONE parsed item. Everything below is per-person."""
+    dropped = None  # the drop notice is emitted once, by handle()
 
     intent = parsed.get("intent")
     name = parsed.get("person")
@@ -774,38 +843,36 @@ def handle(conn: psycopg.Connection, channel: str, text: str) -> str:
             + "\n_Ask me why about any of them._"
         )
 
-    def _with_notice(reply: str) -> str:
-        if not dropped:
-            return reply
-        return (
-            f"_(Dropping my earlier question about “{dropped[:70]}” since this "
-            f"looks like a new message. Resend it if you still want it noted.)_"
-            f"\n\n{reply}"
-        )
+    # The "dropped an unanswered question" notice belongs to the message, not
+    # to one item in it, so handle() emits it once around the whole reply.
 
     if intent == "idea":
-        return _with_notice(_file_idea(content))
+        return _file_idea(content)
 
     if intent == "ask" and name:
         people = resolve(conn, name)
         if len(people) == 1:
-            return _with_notice(
-                _answer(conn, str(people[0]["id"]), people[0]["full_name"], content)
-            )
+            return _answer(conn, str(people[0]["id"]), people[0]["full_name"], content)
 
     if intent == "unclear" or not name:
-        return _with_notice(
+        return (
             "Not sure what to do with that. Name the person and tell me whether "
             "you want it remembered, drafted, or talked through."
         )
 
     people = resolve(conn, name)
     if not people:
-        return _with_notice(
+        return (
             f"I have nobody matching *{name}*. Different spelling, or not in the "
             f"book yet?"
         )
     if len(people) > 1:
+        if not may_ask:
+            return (
+                f"*{name}* matches more than one person and I already have a "
+                f"question open from this message. Send that one on its own and "
+                f"I will file it."
+            )
         _set_pending(conn, channel, {
             "intent": intent, "content": content,
             "candidates": [

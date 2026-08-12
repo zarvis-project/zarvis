@@ -17,12 +17,25 @@ gone.
 
 HOW A VERDICT IS DETERMINED
 ---------------------------
-Gmail deletes a draft when it is sent, so a missing draft means one of two
-things and the difference is the entire point:
+Gmail deletes a draft when it is sent, so a missing draft means one of several
+things and telling them apart is the entire point:
 
   the draft is gone AND a matching message is in Sent   -> sent
-  the draft is gone AND nothing is in Sent              -> rejected
+  the draft is gone, nothing in Sent, gone < 5 days     -> undetermined, wait
+  the draft is gone, nothing in Sent, gone > 5 days     -> rejected
   the draft is still there                              -> undecided, ask again
+
+That middle line exists because Ryan schedules mail in Superhuman, and **a
+scheduled message is invisible to this API**. It lives on Superhuman's servers
+until it fires: not in Sent, not in Drafts, not in Trash, carrying no label,
+absent from a whole-mailbox search including spam. Meanwhile the Zarvis draft it
+was written from is deleted the moment he takes it over.
+
+So on the day, a scheduled send and a binned draft are indistinguishable. They
+stop being indistinguishable later, because a scheduled message lands in Sent
+when it fires. Waiting costs a few days of a missing case-log row. Guessing
+costs the opposite of the truth, recorded permanently, about mail he considers
+already sent.
 
 For a sent draft, the body Ryan actually sent is compared against what Zarvis
 proposed. Identical means the draft was good enough to use as written. Heavily
@@ -59,13 +72,19 @@ log = logging.getLogger("zarvis.verdict")
 # 0.95 allows a signature or a changed greeting without calling it a rewrite.
 UNEDITED_THRESHOLD = 0.95
 
+# How long a draft may be missing from the mailbox before its absence counts as
+# a rejection. Sized for "scheduled Friday afternoon to go out Monday morning",
+# which is the longest ordinary case. Beyond this, a message that was going to
+# send has sent.
+GRACE_DAYS = 5
+
 
 def _outstanding(conn: psycopg.Connection) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
             select d.id, d.person_id, d.gmail_draft_id, d.proposed_body,
-                   d.created_at, d.queue_item_id, p.full_name,
+                   d.created_at, d.queue_item_id, d.vanished_at, p.full_name,
                    (select i.value from zarvis.person_identity i
                      where i.person_id = p.id and i.kind = 'email'
                      order by i.created_at limit 1) as email
@@ -132,6 +151,51 @@ def _sent_body(svc, email: str, since: datetime) -> str | None:
 
 
 
+def _within_grace(conn: psycopg.Connection, row: dict, *, dry_run: bool) -> bool:
+    """Has this draft been missing for less than the grace period?
+
+    Stamps `vanished_at` on the first poll that cannot find it, then answers
+    from that. Returns True while it is too early to call the disappearance a
+    rejection.
+
+    A scheduled send is the case this exists for, but it also covers a draft
+    moved to another client, a Boomerang outbox, and Ryan forwarding the text
+    into a different thread. All of them resolve themselves once the message
+    actually goes out; none of them are rejections.
+    """
+    if row.get("vanished_at") is None:
+        if not dry_run:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update zarvis.draft set vanished_at = now(), updated_at = now() "
+                    "where id = %s",
+                    (row["id"],),
+                )
+            conn.commit()
+            _ask_scheduled_or_binned(conn, row["full_name"])
+        return True
+    return datetime.now(UTC) - row["vanished_at"] < timedelta(days=GRACE_DAYS)
+
+
+def _ask_scheduled_or_binned(conn: psycopg.Connection, name: str) -> None:
+    """Ask once, on the day it vanished, while he still remembers.
+
+    Cheaper and far more accurate than inferring from a mailbox that cannot see
+    the answer. Best effort: a Slack outage must never fail the morning run.
+    """
+    try:
+        from .slack import _dm_channels, say
+
+        for channel in _dm_channels(conn):
+            say(channel,
+                f"Your draft to *{name}* is gone from the mailbox and nothing "
+                f"matching it is in Sent. Scheduled, or binned? If you scheduled "
+                f"it I will pick it up when it fires and record it as sent, so "
+                f"there is nothing to do. Say so and I will log the reason.")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not ask about the vanished draft: %s", exc)
+
+
 def _operator_context(conn: psycopg.Connection, person_id: str) -> str | None:
     """Anything Ryan said about this person around the time he binned the draft.
 
@@ -169,7 +233,7 @@ def poll(conn: psycopg.Connection, *, dry_run: bool) -> dict:
     from .google_auth import execute, gmail_service
 
     counts = {"checked": 0, "still_open": 0, "sent_unedited": 0,
-              "sent_edited": 0, "rejected": 0}
+              "sent_edited": 0, "rejected": 0, "awaiting": 0}
     rows = _outstanding(conn)
     if not rows:
         log.info("no drafts awaiting a verdict")
@@ -193,10 +257,31 @@ def poll(conn: psycopg.Connection, *, dry_run: bool) -> dict:
 
         sent = _sent_body(svc, row["email"], row["created_at"]) if row["email"] else None
 
+        if sent is None and _within_grace(conn, row, dry_run=dry_run):
+            # Gone from drafts, nothing in sent, and it only just vanished.
+            #
+            # This is NOT yet a rejection. Ryan schedules mail in Superhuman,
+            # and a scheduled message is held on Superhuman's servers until it
+            # fires: not in Sent, not in Drafts, not in Trash, no label,
+            # invisible to this API in every way. The Zarvis draft it came from
+            # is deleted the moment he takes it over, so a scheduled send and a
+            # binned draft look identical on the day.
+            #
+            # They stop looking identical later, because a scheduled message
+            # lands in Sent when it fires. So the honest move is to wait. The
+            # cost of waiting is a few days of a missing case-log entry; the
+            # cost of guessing is teaching the model that Ryan bins mail he
+            # actually sent.
+            counts["awaiting"] += 1
+            log.info("%s: draft gone, nothing sent yet. Scheduled, or binned? "
+                     "Holding for up to %d days.", row["full_name"], GRACE_DAYS)
+            continue
+
         if sent is None:
-            # Gone from drafts, absent from sent: Ryan deleted it. That is a
-            # REJECTION and the most informative outcome there is, because it
-            # says the situation was misjudged rather than the wording.
+            # Gone for longer than anything could plausibly stay scheduled, and
+            # still nothing in sent. Now it is a rejection, and the most
+            # informative outcome there is: the situation was misjudged rather
+            # than the wording.
             verdict, distance, final = "rejected", None, None
             counts["rejected"] += 1
             context = _operator_context(conn, str(row["person_id"]))

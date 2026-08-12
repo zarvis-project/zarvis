@@ -96,12 +96,31 @@ def _pending(conn: psycopg.Connection, limit: int) -> list[dict]:
             """
             select d.id, d.person_id, d.subject, d.proposed_body, d.model_id,
                    p.full_name,
-                   (select i.value from zarvis.person_identity i
-                     where i.person_id = p.id and i.kind = 'email'
-                       /*SYNTH:i.value*/
-                     order by i.created_at limit 1) as email
+                   mgr.full_name as route_full_name,
+                   -- coalesce, not two columns, because delivery only ever
+                   -- needs one answer: the address this actually goes to. For
+                   -- an agency's client that is the AGENCY. Compose already
+                   -- wrote the body to the agency about their client, and an
+                   -- address resolved independently here would put that body
+                   -- in front of the client instead, which is the worst of
+                   -- both: the routing rule honoured in the text and broken in
+                   -- the envelope.
+                   coalesce(
+                     (select i.value from zarvis.person_identity i
+                       where i.person_id = mgr.id and i.kind = 'email'
+                         and i.superseded_at is null
+                         /*SYNTH:i.value*/
+                       order by i.created_at limit 1),
+                     (select i.value from zarvis.person_identity i
+                       where i.person_id = p.id and i.kind = 'email'
+                         and i.superseded_at is null
+                         /*SYNTH:i.value*/
+                       order by i.created_at limit 1)
+                   ) as email
             from zarvis.draft d
             join zarvis.person p on p.id = d.person_id
+            left join zarvis.manages m on m.managed_id = p.id
+            left join zarvis.person mgr on mgr.id = m.manager_id
             left join zarvis.queue_item q on q.id = d.queue_item_id
             where d.workspace_id = %s
               and d.status = 'pending'

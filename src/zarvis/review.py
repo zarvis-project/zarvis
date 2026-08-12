@@ -200,6 +200,7 @@ def _board(conn: psycopg.Connection, top: int) -> list[dict]:
                 select mgr.full_name as manager, m.scope, mgr.impact,
                        (select i.value from zarvis.person_identity i
                          where i.person_id = mgr.id and i.kind = 'email'
+                           and i.superseded_at is null
                            /*SYNTH:i.value*/
                          limit 1) as manager_email
                 from zarvis.manages m
@@ -215,6 +216,7 @@ def _board(conn: psycopg.Connection, top: int) -> list[dict]:
                 """
                 select count(*) c from zarvis.person_identity
                 where person_id = %s and kind = 'email'
+                  and superseded_at is null
                   /*SYNTH:value*/
                 """,
                 (row["person_id"],),

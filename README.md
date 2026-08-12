@@ -100,9 +100,13 @@ python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e .
 
 cp .env.example .env.local
-# fill it in, then:
-psql "$ZARVIS_DATABASE_URL" -f migrations/20260808000001_zarvis_schema.sql
-# ...and the rest, in filename order
+
+# Run every migration, in filename order. The first one creates the schema and
+# a workspace row; edit the name and owner_email in it first, they are yours.
+for f in migrations/*.sql; do psql "$ZARVIS_DATABASE_URL" -f "$f"; done
+
+# The id that goes in ZARVIS_WORKSPACE_ID:
+psql "$ZARVIS_DATABASE_URL" -c 'select id, name from zarvis.workspace;'
 
 PYTHONPATH=src python -m zarvis.ingest
 PYTHONPATH=src python -m zarvis.queue --dry-run
@@ -165,6 +169,10 @@ Working, running daily, and young, built in public. The interesting parts are
 the bugs, and they are written up in the commit history rather than tidied away.
 
 Contributions welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Site
+
+[zarvis.co](https://zarvis.co) is built from `docs/` in this repo.
 
 ## License
 
